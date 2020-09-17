@@ -25,10 +25,12 @@ object HttpRequestUtils {
         values: String,
         separator: String
     ): MutableMap<String, String> {
-
-
-        return mutableMapOf()
-
+        val resultMap = mutableMapOf<String, String>()
+        values.split(separator).forEach {
+            val keyValue = getKeyValue(it, "=")
+            resultMap[keyValue?.key!!] = keyValue?.value!!
+        }
+        return resultMap
     }
 
     fun getKeyValue(keyValue: String, regex: String?): Pair? {
