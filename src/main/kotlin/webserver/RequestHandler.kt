@@ -3,6 +3,10 @@ package webserver
 import db.DataBase
 import model.User
 import mu.KLogging
+import org.thymeleaf.TemplateEngine
+import org.thymeleaf.context.Context
+import org.thymeleaf.templatemode.TemplateMode
+import org.thymeleaf.templateresolver.ClassLoaderTemplateResolver
 import util.HttpRequestUtils
 import util.IOUtils
 import java.io.*
@@ -58,13 +62,24 @@ class RequestHandler(private val connection: Socket) : Thread() {
                         } else {
                             responseResource(out, "/user/login_failed.html")
                         }
+                    } else if ("/user/list" == url) {
+                        val user = DataBase.findAll()
+                        val templateEngine = TemplateEngine()
+
+                        val resolver = ClassLoaderTemplateResolver()
+                        resolver.prefix = "/templates/"
+                        resolver.suffix = ".html"
+                        resolver.characterEncoding = "UTF-8"
+                        resolver.templateMode = TemplateMode.HTML
+
+                        templateEngine.setTemplateResolver(resolver)
+                        val context = Context()
+                        context.setVariable("users", user)
+                        val template = templateEngine.process("/list.html",context)
+                        responseHtml(out, template)
                     } else {
                         responseResource(out, url)
                     }
-                    val dos = DataOutputStream(out)
-                    val body = Files.readAllBytes(File("./webapp$url").toPath())
-                    response200Header(dos, body.size)
-                    responseBody(dos, body)
                 }
             }
         } catch (e: IOException) {
@@ -96,8 +111,17 @@ class RequestHandler(private val connection: Socket) : Thread() {
     @Throws(IOException::class)
     private fun responseResource(out: OutputStream, url: String) {
         val dos = DataOutputStream(out)
-        val body = Files.readAllBytes(File("./webapp$url").toPath())
-        response200Header(dos, body.size)
+        val body = Files.readAllBytes(File("./webapp/$url").toPath())
+        val contentType = getContentType(url)
+        response200Header(dos, body.size, contentType)
+        responseBody(dos, body)
+    }
+
+    private fun responseHtml(out: OutputStream, template: String) {
+        val dos = DataOutputStream(out)
+        val body = template.toByteArray()
+        val contentType = getContentType("")
+        response200Header(dos, body.size, contentType)
         responseBody(dos, body)
     }
 
@@ -106,10 +130,10 @@ class RequestHandler(private val connection: Socket) : Thread() {
         return headerTokens[1].trim { it <= ' ' }.toInt()
     }
 
-    private fun response200Header(dos: DataOutputStream, lengthOfBodyContent: Int) {
+    private fun response200Header(dos: DataOutputStream, lengthOfBodyContent: Int, contentType: String) {
         try {
             dos.writeBytes("HTTP/1.1 200 OK \r\n")
-            dos.writeBytes("Content-Type: text/html;charset=utf-8\r\n")
+            dos.writeBytes("Content-Type: $contentType;charset=utf-8\r\n")
             dos.writeBytes("Content-Length: $lengthOfBodyContent\r\n")
             dos.writeBytes("\r\n")
         } catch (e: IOException) {
@@ -123,6 +147,16 @@ class RequestHandler(private val connection: Socket) : Thread() {
             dos.flush()
         } catch (e: IOException) {
             logger.error(e.message)
+        }
+        logger.info("responseBody end")
+    }
+
+    private fun getContentType(url: String): String {
+        return when {
+            url.contains("/js/") -> "application/javascript"
+            url.contains("/images/") -> "image/jpeg"
+            url.contains("/css/") -> "text/css"
+            else -> "text/html"
         }
     }
 
