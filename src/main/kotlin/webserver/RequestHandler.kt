@@ -1,14 +1,13 @@
 package webserver
 
-import db.DataBase
-import model.User
+import model.HttpMethod
+import model.HttpRequest
+import model.HttpResponse
+import model.ResponseCode
 import mu.KLogging
-import org.thymeleaf.TemplateEngine
-import org.thymeleaf.context.Context
-import org.thymeleaf.templatemode.TemplateMode
-import org.thymeleaf.templateresolver.ClassLoaderTemplateResolver
 import util.HttpRequestUtils
 import util.IOUtils
+import webserver.ServiceHandler.Companion.getContentType
 import java.io.*
 import java.net.Socket
 import java.nio.file.Files
@@ -23,62 +22,23 @@ class RequestHandler(private val connection: Socket) : Thread() {
             connection.getInputStream().use { `in` ->
                 connection.getOutputStream().use { out ->
                     // TODO 사용자 요청에 대한 처리는 이 곳에 구현하면 된다.
-                    val br = BufferedReader(InputStreamReader(`in`, "UTF-8"))
-                    var line = br.readLine()
-                    val tokens = line!!.split(" ").toTypedArray()
-                    var contentLength = 0
-                    val url = tokens[1]
-                    if (line == null) {
-                        return
-                    }
-                    while ("" != line) {
-                        logger.debug("header : {} ", line)
-                        line = br.readLine()
-                        if (line.contains("Content-Length")) {
-                            contentLength = getContentLength(line)
-                        }
-                    }
-                    if ("/user/create" == url) {
-                        val body: String = IOUtils.readData(br, contentLength)
-                        val params: Map<String, String> =
-                            HttpRequestUtils.parseQueryString(body)
-                        val user =
-                            User(params["userId"], params["password"], params["name"], params["email"])
-                        val dos = DataOutputStream(out)
-                        response302Header(dos, "/index.html")
-                        DataBase.addUser(user)
-                    } else if ("/user/login" == url) {
-                        val body: String = IOUtils.readData(br, contentLength)
-                        val params: Map<String, String> =
-                            HttpRequestUtils.parseQueryString(body)
-                        val user = DataBase.findUserById(params["userId"])
-                        if (user == null) {
-                            responseResource(out, "/user/login_failed.html")
-                            return
-                        }
-                        if (user.password.equals(params["password"])) {
-                            val dos = DataOutputStream(out)
-                            response302LoginSuccessHeader(dos)
-                        } else {
-                            responseResource(out, "/user/login_failed.html")
-                        }
-                    } else if ("/user/list" == url) {
-                        val user = DataBase.findAll()
-                        val templateEngine = TemplateEngine()
-
-                        val resolver = ClassLoaderTemplateResolver()
-                        resolver.prefix = "/templates/"
-                        resolver.suffix = ".html"
-                        resolver.characterEncoding = "UTF-8"
-                        resolver.templateMode = TemplateMode.HTML
-
-                        templateEngine.setTemplateResolver(resolver)
-                        val context = Context()
-                        context.setVariable("users", user)
-                        val template = templateEngine.process("/list.html",context)
-                        responseHtml(out, template)
+                    val request = getHttpRequest(`in`)
+                    val response: HttpResponse = if (request.uri.startsWith("/user")) {
+                        val serviceHandler = UserServiceHandler()
+                        serviceHandler.handle(request)
                     } else {
-                        responseResource(out, url)
+                        val body = getBodyContent(request.uri)
+                        val contentType = getContentType(request.uri)
+                        val headers = mapOf("Content-Type" to "$contentType;charset=utf-8")
+
+                        HttpResponse(status = ResponseCode.OK, headers = headers, body = body)
+                    }
+
+                    val dos = DataOutputStream(out)
+
+                    ResponseHandler(dos, response).responseHeader()
+                    if (response.body.isNotEmpty()) {
+                        ResponseHandler(dos, response).responseBody()
                     }
                 }
             }
@@ -87,42 +47,51 @@ class RequestHandler(private val connection: Socket) : Thread() {
         }
     }
 
-    private fun response302Header(dos: DataOutputStream, url: String) {
-        try {
-            dos.writeBytes("HTTP/1.1 302 Redirect \r\n")
-            dos.writeBytes("Location: $url \r\n")
-            dos.writeBytes("\r\n")
-        } catch (e: IOException) {
-            logger.error(e.message)
+    private fun getHttpRequest(`in`: InputStream): HttpRequest {
+        val br = BufferedReader(InputStreamReader(`in`, "UTF-8"))
+        var line = br.readLine()
+        val tokens = line!!.split(" ").toTypedArray()
+        var contentLength = 0
+        var cookie = mutableMapOf<String, String>()
+        val url = tokens[1]
+        val headers = mutableMapOf<String, String>()
+
+
+        while ("" != line) {
+            logger.debug("header : {} ", line)
+            line = br.readLine()
+            if (line.contains("Content-Length")) {
+                contentLength = getContentLength(line)
+            }
+            if (line.contains("Cookie")) {
+                val cookies = line.split(": ")[1].split(";")
+                cookies.forEach {
+                    val cookieInfo = it.split("=")
+                    cookie[cookieInfo[0]] = cookieInfo[1]
+                }
+                logger.info("cookies :: $cookies")
+            }
+            if ("" != line) {
+                val header = line.split(": ")
+                headers[header[0]] = header[1]
+            }
         }
+        val body = IOUtils.readData(br, contentLength)
+        val request = HttpRequest(
+            method = HttpMethod.valueOf(tokens[0]),
+            uri = url,
+            body = body,
+            headers = headers,
+            cookies = cookie
+        )
+        if ("" != body)
+            request.queryStrings = HttpRequestUtils.parseQueryString(body)
+
+        return request
     }
 
-    private fun response302LoginSuccessHeader(dos: DataOutputStream) {
-        try {
-            dos.writeBytes("HTTP/1.1 302 Redirect \r\n")
-            dos.writeBytes("Set-Cookie : logined=true \r\n")
-            dos.writeBytes("Location: /index.html \r\n")
-            dos.writeBytes("\r\n")
-        } catch (e: IOException) {
-            logger.error(e.message)
-        }
-    }
-
-    @Throws(IOException::class)
-    private fun responseResource(out: OutputStream, url: String) {
-        val dos = DataOutputStream(out)
-        val body = Files.readAllBytes(File("./webapp/$url").toPath())
-        val contentType = getContentType(url)
-        response200Header(dos, body.size, contentType)
-        responseBody(dos, body)
-    }
-
-    private fun responseHtml(out: OutputStream, template: String) {
-        val dos = DataOutputStream(out)
-        val body = template.toByteArray()
-        val contentType = getContentType("")
-        response200Header(dos, body.size, contentType)
-        responseBody(dos, body)
+    private fun getBodyContent(url: String): ByteArray {
+        return Files.readAllBytes(File("./webapp/$url").toPath())
     }
 
     private fun getContentLength(line: String?): Int {
@@ -130,36 +99,8 @@ class RequestHandler(private val connection: Socket) : Thread() {
         return headerTokens[1].trim { it <= ' ' }.toInt()
     }
 
-    private fun response200Header(dos: DataOutputStream, lengthOfBodyContent: Int, contentType: String) {
-        try {
-            dos.writeBytes("HTTP/1.1 200 OK \r\n")
-            dos.writeBytes("Content-Type: $contentType;charset=utf-8\r\n")
-            dos.writeBytes("Content-Length: $lengthOfBodyContent\r\n")
-            dos.writeBytes("\r\n")
-        } catch (e: IOException) {
-            logger.error(e.message)
-        }
+    companion object : KLogging() {
+        const val HTTP = "HTTP/1.1"
     }
-
-    private fun responseBody(dos: DataOutputStream, body: ByteArray) {
-        try {
-            dos.write(body, 0, body.size)
-            dos.flush()
-        } catch (e: IOException) {
-            logger.error(e.message)
-        }
-        logger.info("responseBody end")
-    }
-
-    private fun getContentType(url: String): String {
-        return when {
-            url.contains("/js/") -> "application/javascript"
-            url.contains("/images/") -> "image/jpeg"
-            url.contains("/css/") -> "text/css"
-            else -> "text/html"
-        }
-    }
-
-    companion object : KLogging()
 
 }
